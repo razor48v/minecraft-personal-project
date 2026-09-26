@@ -31,7 +31,7 @@ const proxyPool = [
 let poolIndex = 0;
 
 // ==========================================
-// 3. CONNECTION CONTROLLER
+// 3. CORE BEDROCK CONNECTION CONTROLLER
 // ==========================================
 function launchCloudBot() {
   if (poolIndex >= proxyPool.length) {
@@ -47,15 +47,17 @@ function launchCloudBot() {
   let actionTimer = null;
   let cleanedUp = false;
 
-  // Players detected on this connection
-  const onlinePlayers = new Set();
+  // ==========================================
+  // TRACK ONLINE PLAYERS
+  // ==========================================
+  const onlinePlayers = new Map();
 
-  // ==========================================
-  // CONNECT
-  // ==========================================
   try {
     const agent = new SocksProxyAgent(currentProxy);
 
+    // ==========================================
+    // BEDROCK CLIENT
+    // ==========================================
     const client = bedrock.createClient({
       host: '2b2tmcpe.org',
       port: 19132,
@@ -69,94 +71,77 @@ function launchCloudBot() {
     // ==========================================
     client.on('player_list', (packet) => {
       try {
-        // Print the first packet so we can see the
-        // exact structure your server is sending.
-        if (!client.__printedPlayerPacket) {
-          client.__printedPlayerPacket = true;
-
-          console.log('\n==========================================');
-          console.log('📋 RAW PLAYER LIST PACKET');
-          console.log('==========================================');
-
-          console.dir(packet, {
-            depth: 6,
-            colors: false
-          });
-
-          console.log('==========================================\n');
-        }
-
-        if (!packet || !packet.records) {
-          console.log('⚠️ Player list packet contained no records.');
+        if (!packet || !Array.isArray(packet.records)) {
           return;
         }
 
-        // ==========================================
-        // DETERMINE ADD / REMOVE
-        // ==========================================
-        const action = packet.action;
-
-        const isAdd =
-          action === 0 ||
-          action === 'add' ||
-          action === 'ADD';
-
-        const isRemove =
-          action === 1 ||
-          action === 'remove' ||
-          action === 'REMOVE';
-
-        // ==========================================
-        // PROCESS PLAYERS
-        // ==========================================
         for (const player of packet.records) {
           if (!player) continue;
 
-          // Try all common Bedrock player-name fields.
-          const name =
-            player.username ||
-            player.name ||
-            player.display_name ||
-            player.displayName;
+          const username = player.username;
 
-          if (!name) {
-            continue;
+          if (!username) continue;
+
+          // ======================================
+          // PLAYER JOINED
+          // ======================================
+          if (
+            player.type === 'add' ||
+            player.legacy_type === 0
+          ) {
+            onlinePlayers.set(
+              player.uuid || username,
+              username
+            );
           }
 
-          if (isAdd) {
-            onlinePlayers.add(String(name));
-          } else if (isRemove) {
-            onlinePlayers.delete(String(name));
+          // ======================================
+          // PLAYER LEFT
+          // ======================================
+          else if (
+            player.type === 'remove' ||
+            player.legacy_type === 1
+          ) {
+            onlinePlayers.delete(
+              player.uuid || username
+            );
           }
         }
 
         // ==========================================
-        // PRINT ONLINE COUNT
+        // PRINT CURRENT ONLINE PLAYERS
         // ==========================================
+        const names = [...onlinePlayers.values()]
+          .sort((a, b) => a.localeCompare(b));
+
         console.log(
-          `👥 ONLINE: ${onlinePlayers.size}` +
-          (
-            onlinePlayers.size > 0
-              ? ` | ${[...onlinePlayers].join(', ')}`
-              : ' | Nobody detected'
-          )
+          `👥 ONLINE: ${names.length}`
         );
+
+        if (names.length > 0) {
+          console.log(
+            `👤 ${names.join(', ')}`
+          );
+        }
 
       } catch (err) {
         console.log(
-          `⚠️ Player-list processing error: ${err.message}`
+          `⚠️ Player list processing error: ${err.message}`
         );
       }
     });
 
     // ==========================================
-    // SPAWN
+    // SUCCESSFUL SPAWN
     // ==========================================
     client.on('spawn', () => {
       console.log(
         '✅ SUCCESS! Bot cleared firewall and spawned into 2b2t overworld!'
       );
 
+      // ========================================
+      // SWING ARM
+      // ========================================
       actionTimer = setInterval(() => {
         try {
           client.queue('animate', {
@@ -196,7 +181,7 @@ function launchCloudBot() {
     });
 
     // ==========================================
-    // CLEANUP / NEXT PROXY
+    // CLEANUP + NEXT ROUTE
     // ==========================================
     function cleanupAndNext() {
       // Prevent error + close from creating
@@ -207,13 +192,16 @@ function launchCloudBot() {
 
       cleanedUp = true;
 
+      // Stop animation timer
       if (actionTimer) {
         clearInterval(actionTimer);
         actionTimer = null;
       }
 
+      // Clear old player list
       onlinePlayers.clear();
 
+      // Move to next proxy
       poolIndex++;
 
       if (poolIndex >= proxyPool.length) {
@@ -228,6 +216,7 @@ function launchCloudBot() {
         );
       }
 
+      // Wait before reconnecting
       setTimeout(() => {
         launchCloudBot();
       }, 5000);
@@ -240,6 +229,7 @@ function launchCloudBot() {
 
     if (!cleanedUp) {
       cleanedUp = true;
+
       poolIndex++;
 
       setTimeout(() => {
@@ -250,7 +240,7 @@ function launchCloudBot() {
 }
 
 // ==========================================
-// 4. START
+// 4. IGNITION
 // ==========================================
 console.log('🚀 Starting Cloud Bot...');
 
