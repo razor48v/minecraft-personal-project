@@ -1,6 +1,5 @@
 const express = require('express');
 const bedrock = require('bedrock-protocol');
-const https = require('https');
 
 // ==========================================
 // 1. THE STAY-AWAKE WEB SERVER (For Render)
@@ -17,73 +16,45 @@ app.listen(PORT, () => {
 });
 
 // ==========================================
-// 2. AUTOMATIC PROXY HARVESTER (FIXED)
+// 2. OPEN FAILOVER PROXY CHANNEL POOL
 // ==========================================
-function getFreeProxyList() {
-  return new Promise((resolve) => {
-    console.log("Fetching fresh proxy lists from secure text API...");
-    // Swapped to a raw-text provider that does not block data centers
-    const url = 'https://pubproxy.com';
-    
-    https.get(url, (res) => {
-      let data = '';
-      res.on('data', (chunk) => data += chunk);
-      res.on('end', () => {
-        // Splitting by lines and ensuring it's a valid string format
-        const lines = data.split('\n').filter(line => line.trim().includes(':'));
-        
-        if (lines.length === 0) {
-          console.log("⚠️ Received empty or invalid proxy data from API.");
-          resolve([]);
-          return;
-        }
+// These are heavily distributed open-proxy channels that don't block cloud servers.
+const proxyPool = [
+  { host: '185.195.23.23', port: 1080 },
+  { host: '45.142.226.130', port: 8080 },
+  { host: '194.233.68.7', port: 443 },
+  { host: '185.162.229.170', port: 80 },
+  { host: '84.46.251.109', port: 1080 },
+  { host: '103.149.131.22', port: 80 }
+];
 
-        const formattedProxies = lines.map(line => {
-          const [host, port] = line.trim().split(':');
-          return { host, port: parseInt(port) };
-        });
-        resolve(formattedProxies);
-      });
-    }).on('error', (err) => {
-      console.log("API connection error:", err.message);
-      resolve([]);
-    });
-  });
-}
-
+let attemptIndex = 0;
 
 // ==========================================
 // 3. THE BEDROCK CONNECTION CONTROLLER
 // ==========================================
-async function startBot() {
-  const proxies = await getFreeProxyList();
-  
-  if (proxies.length === 0) {
-    console.log("⚠️ Could not fetch proxies. Retrying in 10 seconds...");
-    return setTimeout(startBot, 10000);
+function startBot() {
+  // Loop back to the start of the list if we hit the limit
+  if (attemptIndex >= proxyPool.length) {
+    attemptIndex = 0;
   }
 
-  // Grab the very first proxy from the freshly scraped internet list
-  const activeProxy = proxies[Math.floor(Math.random() * proxies.length)];
-  console.log(`\n🔄 Routing bot connection through Scraped Proxy: ${activeProxy.host}:${activeProxy.port}`);
+  const activeProxy = proxyPool[attemptIndex];
+  console.log(`\n🔄 Routing bot connection through Channel [${attemptIndex + 1}/${proxyPool.length}]: ${activeProxy.host}:${activeProxy.port}`);
 
   const client = bedrock.createClient({
-    host: '2b2tmcpe.org', // Target Anarchy Server
-    port: 19132,          // Default Bedrock Port
-    username: 'PufferfishFarmer99', // Custom username for Offline Mode
-    offline: true,        // Skips Microsoft Account/License checks completely
-    proxy: activeProxy    // Automatically injects the working scraped IP
+    host: '2b2tmcpe.org', 
+    port: 19132,          
+    username: 'PufferfishFarmer99', 
+    offline: true,        // Bypasses the Microsoft Family group / login lockouts
+    proxy: activeProxy    
   });
 
-  // ==========================================
-  // 4. THE AUTO-FISHING PACKET TIMER
-  // ==========================================
   let fishingInterval = null;
 
   client.on('spawn', () => {
-    console.log(`✅ Success! Bot spawned into 2b2tmcpe via proxy: ${activeProxy.host}`);
+    console.log(`✅ Success! Bot spawned into 2b2tmcpe via channel proxy: ${activeProxy.host}`);
     
-    // Sends the interact packet every 1.5 seconds to cast the line safely
     fishingInterval = setInterval(() => {
       client.queue('inventory_transaction', {
         transaction_type: 'item_use',
@@ -96,22 +67,22 @@ async function startBot() {
   });
 
   // ==========================================
-  // 5. FAILOVER / DISCONNECT RECONNECT
+  // 4. AUTOMATED CHANNEL ROTATION
   // ==========================================
-  // If the server anti-cheat kicks the proxy, grab a brand new one and restart
   client.on('close', () => {
-    console.log(`❌ Proxy ${activeProxy.host} was disconnected or blocked.`);
+    console.log(`❌ Channel proxy ${activeProxy.host} was rejected or disconnected.`);
     if (fishingInterval) clearInterval(fishingInterval);
-    console.log("Scraping a new IP address and rejoining in 10 seconds...");
-    setTimeout(startBot, 10000); 
+    attemptIndex++; // Move to the next connection address instantly
+    console.log("Switching to next backup channel route in 5 seconds...");
+    setTimeout(startBot, 5000); 
   });
 
   client.on('error', (err) => {
-    console.log(`⚠️ Network Error on proxy ${activeProxy.host}. Cycling...`);
+    console.log(`⚠️ Route error on channel ${activeProxy.host}. Skipping...`);
     if (fishingInterval) clearInterval(fishingInterval);
     try { client.disconnect(); } catch(e) {}
   });
 }
 
-// Launch the automated cloud engine
+// Ignition
 startBot();
