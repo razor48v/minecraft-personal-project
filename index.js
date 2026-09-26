@@ -61,23 +61,28 @@ const proxyPool = [
 let poolIndex = 0;
 
 // ==========================================
-// 3. SERVER STATUS MONITOR
+// 3. SERVER POPULATION MONITOR
 // ==========================================
 let statusCheckRunning = false;
 
 async function checkServerStatus() {
   if (statusCheckRunning) {
+    console.log(
+      '⏳ Previous status check is still running...'
+    );
     return;
   }
 
   statusCheckRunning = true;
+
+  console.log('🔎 Checking server population...');
 
   try {
     const status = await bedrock.ping({
       host: '2b2tmcpe.org',
       port: 19132,
       transport: 'raknet',
-      timeout: 5000
+      timeout: 10000
     });
 
     const online =
@@ -113,11 +118,19 @@ async function checkServerStatus() {
   }
 }
 
-// Initial status check
+console.log(
+  '⏱️ Starting 30-second population monitor...'
+);
+
+// Run immediately
 checkServerStatus();
 
-// Check every 30 seconds
+// Then every 30 seconds
 setInterval(() => {
+  console.log(
+    '⏰ 30-second population timer fired'
+  );
+
   checkServerStatus();
 }, 30000);
 
@@ -145,12 +158,12 @@ function launchCloudBot() {
   let reconnectScheduled = false;
 
   // ========================================
-  // PLAYER TRACKING
+  // CLIENT PLAYER TRACKING
   // ========================================
   const onlinePlayers = new Map();
 
   // ========================================
-  // CLEANUP
+  // RECONNECT HANDLER
   // ========================================
   function scheduleNextRoute(reason) {
     if (reconnectScheduled) {
@@ -195,12 +208,8 @@ function launchCloudBot() {
     const client = bedrock.createClient({
       host: '2b2tmcpe.org',
       port: 19132,
-
       username: 'PufferfishFarmer99',
-
-      // Keep your existing offline configuration.
       offline: true,
-
       agent: agent
     });
 
@@ -242,7 +251,7 @@ function launchCloudBot() {
       );
 
       // ======================================
-      // ARM ANIMATION
+      // PERIODIC ARM ANIMATION
       // ======================================
       actionTimer = setInterval(() => {
         try {
@@ -261,7 +270,7 @@ function launchCloudBot() {
     });
 
     // ========================================
-    // SERVER TEXT / CHAT
+    // SERVER TEXT
     // ========================================
     client.on('text', (packet) => {
       try {
@@ -351,6 +360,9 @@ function launchCloudBot() {
           }
         }
 
+        // This is ONLY the client's received
+        // player-list count, NOT the server
+        // population.
         const names = [
           ...onlinePlayers.values()
         ].sort((a, b) =>
@@ -377,7 +389,7 @@ function launchCloudBot() {
     });
 
     // ========================================
-    // ERROR
+    // CLIENT ERROR
     // ========================================
     client.on('error', (err) => {
       console.log(
@@ -392,7 +404,7 @@ function launchCloudBot() {
     });
 
     // ========================================
-    // CLOSE
+    // CONNECTION CLOSED
     // ========================================
     client.on('close', () => {
       scheduleNextRoute(
@@ -414,7 +426,7 @@ function launchCloudBot() {
 }
 
 // ==========================================
-// 5. START
+// 5. START BOT
 // ==========================================
 console.log('🚀 Starting Cloud Bot...');
 
