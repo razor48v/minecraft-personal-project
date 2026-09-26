@@ -3,54 +3,12 @@ const bedrock = require('bedrock-protocol');
 const { SocksProxyAgent } = require('socks-proxy-agent');
 
 // ==========================================
-// STARTUP
-// ==========================================
-console.log('==========================================');
-console.log('🚀 2b2t Pufferfish Bot Starting');
-console.log('==========================================');
-console.log(`Node: ${process.version}`);
-
-try {
-  console.log(
-    `bedrock-protocol: ${require('bedrock-protocol/package.json').version}`
-  );
-} catch {
-  console.log('bedrock-protocol: unknown');
-}
-
-try {
-  console.log(
-    `minecraft-data: ${require('minecraft-data/package.json').version}`
-  );
-} catch {
-  console.log('minecraft-data: unknown');
-}
-
-console.log('==========================================');
-
-// ==========================================
-// RENDER WEB SERVER
-// ==========================================
-const app = express();
-const PORT = process.env.PORT || 3000;
-
-app.get('/', (req, res) => {
-  res.send('Pufferfish Bedrock Bot Online');
-});
-
-app.listen(PORT, () => {
-  console.log(`🌐 Web server active on port ${PORT}`);
-});
-
-// ==========================================
-// SERVER
+// CONFIG
 // ==========================================
 const SERVER_HOST = '2b2tmcpe.org';
 const SERVER_PORT = 19132;
+const USERNAME = 'PufferfishFarmer99';
 
-// ==========================================
-// PROXY POOL
-// ==========================================
 const proxyPool = [
   'socks5://185.195.23.23:1080',
   'socks5://84.46.251.109:1080',
@@ -60,25 +18,71 @@ const proxyPool = [
   'socks5://68.183.109.113:80'
 ];
 
-let poolIndex = 0;
+// ==========================================
+// STATE
+// ==========================================
+let currentRoute = 0;
+
+// Last route that actually reached spawn.
+// -1 means we don't have a known-good route yet.
+let lastWorkingRoute = -1;
+
+let client = null;
+let connecting = false;
+let spawned = false;
+let retryTimer = null;
+let actionTimer = null;
+
+// Prevent multiple close/error handlers from
+// scheduling several reconnects at once.
+let reconnectScheduled = false;
 
 // ==========================================
-// CONNECTION STATE
+// RENDER WEB SERVER
 // ==========================================
-let activeClient = null;
-let connectionInProgress = false;
-let activeRoute = false;
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.get('/', (req, res) => {
+  res.send('2b2t Bedrock Bot Online');
+});
+
+app.listen(PORT, () => {
+  console.log(`🌐 Web server active on port ${PORT}`);
+});
 
 // ==========================================
-// SERVER POPULATION MONITOR
+// VERSION INFO
+// ==========================================
+console.log('==========================================');
+console.log('🚀 Starting Cloud Bot...');
+console.log(`Node: ${process.version}`);
+
+try {
+  console.log(
+    `bedrock-protocol: ${
+      require('bedrock-protocol/package.json').version
+    }`
+  );
+} catch {}
+
+try {
+  console.log(
+    `minecraft-data: ${
+      require('minecraft-data/package.json').version
+    }`
+  );
+} catch {}
+
+console.log('==========================================');
+
+// ==========================================
+// SERVER STATUS
 // ==========================================
 let statusCheckRunning = false;
 
 async function checkServerStatus() {
-  if (statusCheckRunning) {
-    console.log('⏳ Previous population check still running...');
-    return;
-  }
+  if (statusCheckRunning) return;
 
   statusCheckRunning = true;
 
@@ -111,10 +115,9 @@ async function checkServerStatus() {
     if (status.version) {
       console.log(`🎮 VERSION: ${status.version}`);
     }
-
   } catch (err) {
     console.log(
-      `⚠️ SERVER STATUS FAILED: ${err?.message || err}`
+      `⚠️ Population check failed: ${err?.message || err}`
     );
   } finally {
     statusCheckRunning = false;
@@ -131,115 +134,138 @@ setInterval(() => {
 }, 30000);
 
 // ==========================================
-// MOVE TO NEXT ROUTE
+// SCHEDULE RECONNECT
 // ==========================================
-function moveToNextRoute(reason) {
-  if (connectionInProgress) {
-    connectionInProgress = false;
-  }
-
-  activeRoute = false;
-  activeClient = null;
-
-  console.log(`❌ ${reason}`);
-
-  poolIndex++;
-
-  if (poolIndex >= proxyPool.length) {
-    console.log(
-      '🔁 All routes exhausted. Restarting from route 1...'
-    );
-
-    poolIndex = 0;
-  } else {
-    console.log(
-      `🔄 Moving to route ${poolIndex + 1}/${proxyPool.length}`
-    );
-  }
-
-  setTimeout(() => {
-    launchCloudBot();
-  }, 5000);
-}
-
-// ==========================================
-// LAUNCH BOT
-// ==========================================
-function launchCloudBot() {
-  // ----------------------------------------
-  // NEVER START ANOTHER CONNECTION IF ONE
-  // IS ALREADY ACTIVE
-  // ----------------------------------------
-  if (activeClient || activeRoute || connectionInProgress) {
-    console.log(
-      '🟢 Existing connection is active. Staying on current route.'
-    );
-
+function scheduleReconnect(delay = 5000) {
+  if (reconnectScheduled) {
     return;
   }
 
-  if (poolIndex >= proxyPool.length) {
-    poolIndex = 0;
+  reconnectScheduled = true;
+
+  if (retryTimer) {
+    clearTimeout(retryTimer);
   }
 
-  connectionInProgress = true;
+  retryTimer = setTimeout(() => {
+    retryTimer = null;
+    reconnectScheduled = false;
+    connectBot();
+  }, delay);
+}
 
-  const currentRouteNumber = poolIndex + 1;
-  const currentProxy = proxyPool[poolIndex];
+// ==========================================
+// CLEANUP
+// ==========================================
+function cleanupClient() {
+  if (actionTimer) {
+    clearInterval(actionTimer);
+    actionTimer = null;
+  }
+
+  client = null;
+  connecting = false;
+  spawned = false;
+}
+
+// ==========================================
+// PICK NEXT ROUTE
+// ==========================================
+function advanceRoute() {
+  currentRoute++;
+
+  if (currentRoute >= proxyPool.length) {
+    currentRoute = 0;
+
+    console.log(
+      '🔁 Reached the end of the proxy list.'
+    );
+  }
+}
+
+// ==========================================
+// CONNECTION
+// ==========================================
+function connectBot() {
+  if (client || connecting) {
+    console.log(
+      '🟢 A connection is already active/in progress.'
+    );
+    return;
+  }
+
+  // ----------------------------------------
+  // IMPORTANT:
+  //
+  // If we previously had a route reach spawn,
+  // always retry that route first.
+  // ----------------------------------------
+  if (lastWorkingRoute !== -1) {
+    currentRoute = lastWorkingRoute;
+
+    console.log(
+      `⭐ Using last known working route: ` +
+      `${currentRoute + 1}/${proxyPool.length}`
+    );
+  }
+
+  const routeNumber = currentRoute + 1;
+  const proxy = proxyPool[currentRoute];
+
+  connecting = true;
 
   console.log('');
   console.log(
     `🌐 Attempting route [` +
-    `${currentRouteNumber}/${proxyPool.length}]: ${currentProxy}`
+    `${routeNumber}/${proxyPool.length}]: ${proxy}`
   );
 
-  let actionTimer = null;
-  let finished = false;
+  let connectionEnded = false;
 
   try {
-    const agent = new SocksProxyAgent(currentProxy);
+    const agent = new SocksProxyAgent(proxy);
 
-    const client = bedrock.createClient({
+    const newClient = bedrock.createClient({
       host: SERVER_HOST,
       port: SERVER_PORT,
-      username: 'PufferfishFarmer99',
+      username: USERNAME,
       offline: true,
       agent
     });
 
-    activeClient = client;
+    client = newClient;
 
     // ======================================
-    // RAKNET CONNECT
+    // CONNECT
     // ======================================
-    client.on('connect', () => {
+    newClient.on('connect', () => {
       console.log(
-        `🔌 CONNECTED through route ${currentRouteNumber}`
+        `🔌 TCP/RakNet connection established on route ${routeNumber}`
       );
     });
 
     // ======================================
     // LOGIN
     // ======================================
-    client.on('login', () => {
+    newClient.on('login', () => {
       console.log(
-        `🔐 LOGIN SUCCESS through route ${currentRouteNumber}`
+        `🔐 LOGIN received on route ${routeNumber}`
       );
     });
 
     // ======================================
     // JOIN
     // ======================================
-    client.on('join', () => {
+    newClient.on('join', () => {
       console.log(
-        `🟡 JOIN: Server accepted login on route ${currentRouteNumber}`
+        `🟡 JOIN: Server accepted login`
       );
     });
 
     // ======================================
     // PLAY STATUS
     // ======================================
-    client.on('play_status', (packet) => {
+    newClient.on('play_status', packet => {
       console.log(
         '🎮 PLAY_STATUS:',
         packet
@@ -247,51 +273,47 @@ function launchCloudBot() {
     });
 
     // ======================================
-    // SPAWN = ROUTE IS NOW ACTIVE
+    // SPAWN
+    //
+    // This is the important success point.
     // ======================================
-    client.on('spawn', () => {
-      if (finished) {
-        return;
-      }
+    newClient.on('spawn', () => {
+      if (connectionEnded) return;
 
-      // This is the important part:
-      // once spawned, STOP rotating routes.
-      activeRoute = true;
-      connectionInProgress = false;
+      connecting = false;
+      spawned = true;
+
+      // Remember this route permanently for
+      // the lifetime of this process.
+      lastWorkingRoute = currentRoute;
 
       console.log('');
+      console.log('==========================================');
       console.log(
-        '=========================================='
+        `🟢 BOT FULLY SPAWNED ON ROUTE ${routeNumber}`
       );
       console.log(
-        `🟢 BOT ONLINE — ROUTE ${currentRouteNumber} IS WORKING`
+        `⭐ Remembering route ${routeNumber} as the working route`
       );
       console.log(
-        `🌐 Active proxy: ${currentProxy}`
+        '🔒 Staying on this route until the connection closes.'
       );
-      console.log(
-        '🔒 Staying on this route until disconnect.'
-      );
-      console.log(
-        '=========================================='
-      );
+      console.log('==========================================');
 
-      // --------------------------------------
-      // ARM ANIMATION
-      // --------------------------------------
+      // Keep your existing small activity packet.
       if (actionTimer) {
         clearInterval(actionTimer);
       }
 
       actionTimer = setInterval(() => {
         try {
-          client.queue('animate', {
+          newClient.queue('animate', {
             action_id: 1,
-            runtime_entity_id: client.entityId
+            runtime_entity_id: newClient.entityId
           });
         } catch (err) {
           console.log(
-            `⚠️ Animation error: ${err?.message || err}`
+            `⚠️ Activity packet failed: ${err?.message || err}`
           );
         }
       }, 1500);
@@ -300,41 +322,28 @@ function launchCloudBot() {
     // ======================================
     // SERVER CHAT
     // ======================================
-    client.on('text', (packet) => {
+    newClient.on('text', packet => {
       if (packet?.message) {
-        console.log(
-          `💬 SERVER: ${packet.message}`
-        );
+        console.log(`💬 SERVER: ${packet.message}`);
       }
     });
 
     // ======================================
     // KICK
     // ======================================
-    client.on('kick', (packet) => {
-      console.log(
-        '🚫 KICK:',
-        packet
-      );
-
-      const message =
-        packet?.message || '';
-
-      if (
-        message.toLowerCase().includes('already connected')
-      ) {
-        console.log(
-          'ℹ️ Server reports this username is already connected.'
-        );
-      }
+    newClient.on('kick', packet => {
+      console.log('🚫 KICK:', packet);
     });
 
     // ======================================
     // ERROR
+    //
+    // IMPORTANT:
+    // Don't immediately rotate if we're already
+    // spawned. Wait for close.
     // ======================================
-    client.on('error', (err) => {
-      const message =
-        err?.message || String(err);
+    newClient.on('error', err => {
+      const message = err?.message || String(err);
 
       console.log(
         `⚠️ CLIENT ERROR: ${message}`
@@ -346,147 +355,143 @@ function launchCloudBot() {
         )
       ) {
         console.log(
-          'ℹ️ Route returned unsupported Bedrock protocol 419.'
+          'ℹ️ This proxy is not compatible with the server protocol.'
         );
       }
 
-      // If we're already fully connected,
-      // let CLOSE handle the actual rotation.
-      if (activeRoute) {
+      if (spawned) {
         console.log(
-          '⚠️ Active route encountered an error; waiting for connection close.'
+          'ℹ️ Bot is already spawned; waiting for close before changing routes.'
         );
 
         return;
       }
 
-      if (!finished) {
-        finished = true;
+      // Before spawn, this route failed.
+      console.log(
+        `❌ Route ${routeNumber} failed before spawn.`
+      );
 
-        if (actionTimer) {
-          clearInterval(actionTimer);
-          actionTimer = null;
-        }
+      if (connectionEnded) return;
 
-        activeClient = null;
-        activeRoute = false;
-        connectionInProgress = false;
+      connectionEnded = true;
+
+      cleanupClient();
+
+      // If we don't have a known working route,
+      // try the next proxy.
+      if (lastWorkingRoute === -1) {
+        advanceRoute();
 
         console.log(
-          '🔄 Connection failed before spawn; trying next route.'
+          `🔄 Moving to route ` +
+          `${currentRoute + 1}/${proxyPool.length}`
         );
 
-        poolIndex++;
+        scheduleReconnect(5000);
 
-        if (poolIndex >= proxyPool.length) {
-          poolIndex = 0;
-
-          console.log(
-            '🔁 All routes failed. Restarting from route 1 in 15 seconds...'
-          );
-
-          setTimeout(() => {
-            launchCloudBot();
-          }, 15000);
-        } else {
-          console.log(
-            `🔄 Moving to route ${poolIndex + 1}/${proxyPool.length}`
-          );
-
-          setTimeout(() => {
-            launchCloudBot();
-          }, 5000);
-        }
+        return;
       }
+
+      // We DO have a known working route.
+      // Don't forget it.
+      console.log(
+        `⭐ Known working route is ` +
+        `${lastWorkingRoute + 1}/${proxyPool.length}`
+      );
+
+      console.log(
+        '🔁 Retrying the known working route.'
+      );
+
+      currentRoute = lastWorkingRoute;
+
+      scheduleReconnect(5000);
     });
 
     // ======================================
     // CLOSE
     // ======================================
-    client.on('close', () => {
-      if (finished) {
-        return;
-      }
+    newClient.on('close', () => {
+      if (connectionEnded) return;
 
-      finished = true;
+      connectionEnded = true;
 
-      if (actionTimer) {
-        clearInterval(actionTimer);
-        actionTimer = null;
-      }
-
-      const wasActive = activeRoute;
-
-      activeClient = null;
-      activeRoute = false;
-      connectionInProgress = false;
+      const wasSpawned = spawned;
 
       console.log('');
 
-      if (wasActive) {
+      if (wasSpawned) {
         console.log(
-          '🔴 ACTIVE BOT CONNECTION LOST.'
-        );
-
-        console.log(
-          `🔄 Route ${currentRouteNumber} disconnected.`
+          `🔴 Route ${routeNumber} disconnected after successful spawn.`
         );
       } else {
         console.log(
-          '❌ Connection closed before spawn.'
+          `❌ Route ${routeNumber} closed before spawn.`
         );
       }
 
-      poolIndex++;
+      cleanupClient();
 
-      if (poolIndex >= proxyPool.length) {
-        poolIndex = 0;
+      // ------------------------------------
+      // IF THIS ROUTE WORKED BEFORE:
+      //
+      // Retry it first.
+      // ------------------------------------
+      if (lastWorkingRoute !== -1) {
+        currentRoute = lastWorkingRoute;
 
         console.log(
-          '🔁 All routes exhausted. Returning to route 1.'
+          `⭐ Retrying last known working route ` +
+          `${currentRoute + 1}/${proxyPool.length}...`
         );
-      } else {
-        console.log(
-          `🔄 Next route: ${poolIndex + 1}/${proxyPool.length}`
-        );
+
+        scheduleReconnect(5000);
+
+        return;
       }
 
-      setTimeout(() => {
-        launchCloudBot();
-      }, 5000);
+      // ------------------------------------
+      // NO KNOWN GOOD ROUTE YET:
+      //
+      // Continue through proxy list.
+      // ------------------------------------
+      advanceRoute();
+
+      console.log(
+        `🔄 Moving to route ` +
+        `${currentRoute + 1}/${proxyPool.length}`
+      );
+
+      scheduleReconnect(5000);
     });
 
   } catch (err) {
-    activeClient = null;
-    activeRoute = false;
-    connectionInProgress = false;
-
     console.log(
-      `⚠️ CLIENT INITIALIZATION ERROR: ${
-        err?.message || err
-      }`
+      `⚠️ Failed to initialize route ${routeNumber}: ` +
+      `${err?.message || err}`
     );
 
-    poolIndex++;
+    cleanupClient();
 
-    if (poolIndex >= proxyPool.length) {
-      poolIndex = 0;
+    if (lastWorkingRoute !== -1) {
+      currentRoute = lastWorkingRoute;
 
       console.log(
-        '🔁 All routes exhausted. Retrying route 1 in 15 seconds...'
+        `⭐ Retrying known working route ` +
+        `${currentRoute + 1}/${proxyPool.length}`
       );
 
-      setTimeout(() => {
-        launchCloudBot();
-      }, 15000);
+      scheduleReconnect(5000);
     } else {
+      advanceRoute();
+
       console.log(
-        `🔄 Moving to route ${poolIndex + 1}/${proxyPool.length}`
+        `🔄 Moving to route ` +
+        `${currentRoute + 1}/${proxyPool.length}`
       );
 
-      setTimeout(() => {
-        launchCloudBot();
-      }, 5000);
+      scheduleReconnect(5000);
     }
   }
 }
@@ -494,6 +499,4 @@ function launchCloudBot() {
 // ==========================================
 // START
 // ==========================================
-console.log('🚀 Starting Cloud Bot...');
-
-launchCloudBot();
+connectBot();
