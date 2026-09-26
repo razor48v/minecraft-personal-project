@@ -8,7 +8,9 @@ const { SocksProxyAgent } = require('socks-proxy-agent');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.get('/', (req, res) => res.send('Self-Contained Proxy Pipeline Active!'));
+app.get('/', (req, res) => {
+  res.send('Self-Contained Proxy Pipeline Active!');
+});
 
 app.listen(PORT, () => {
   console.log(`Web server active on port ${PORT}`);
@@ -32,6 +34,7 @@ let poolIndex = 0;
 // 3. CORE BEDROCK CONNECTION CONTROLLER
 // ==========================================
 function launchCloudBot() {
+  // Reset to first proxy after reaching the end
   if (poolIndex >= proxyPool.length) {
     poolIndex = 0;
   }
@@ -44,12 +47,22 @@ function launchCloudBot() {
 
   let actionTimer = null;
 
-  // Keeps track of players currently reported by the server
+  // Prevent error + close from both starting
+  // separate reconnect loops
+  let cleanedUp = false;
+
+  // Track players for THIS connection
   const onlinePlayers = new Set();
 
   try {
+    // ==========================================
+    // SOCKS PROXY
+    // ==========================================
     const agent = new SocksProxyAgent(currentProxy);
 
+    // ==========================================
+    // BEDROCK CLIENT
+    // ==========================================
     const client = bedrock.createClient({
       host: '2b2tmcpe.org',
       port: 19132,
@@ -62,51 +75,75 @@ function launchCloudBot() {
     // PLAYER LIST TRACKING
     // ==========================================
     client.on('player_list', (packet) => {
-      // Bedrock player_list packets contain an action:
-      // 0 = add players
-      // 1 = remove players
-      //
-      // The exact property names can vary with protocol versions,
-      // so we handle the common forms.
+      try {
+        if (!packet || !packet.records) {
+          return;
+        }
 
-      if (packet.records) {
         for (const player of packet.records) {
           const name =
             player.username ||
             player.name ||
             player.display_name;
 
-          if (!name) continue;
+          if (!name) {
+            continue;
+          }
 
-          if (packet.action === 'add' || packet.action === 0) {
+          // Add player
+          if (
+            packet.action === 'add' ||
+            packet.action === 0
+          ) {
             onlinePlayers.add(name);
-          } else if (packet.action === 'remove' || packet.action === 1) {
+          }
+
+          // Remove player
+          else if (
+            packet.action === 'remove' ||
+            packet.action === 1
+          ) {
             onlinePlayers.delete(name);
           }
         }
-      }
 
-      console.log(
-        `👥 Players online: ${onlinePlayers.size}` +
-        (onlinePlayers.size
-          ? ` | ${[...onlinePlayers].join(', ')}`
-          : '')
-      );
+        // Print current online players
+        console.log(
+          `👥 ONLINE: ${onlinePlayers.size}` +
+          (
+            onlinePlayers.size > 0
+              ? ` | ${[...onlinePlayers].join(', ')}`
+              : ' | Nobody detected'
+          )
+        );
+
+      } catch (err) {
+        console.log(
+          `⚠️ Player list processing error: ${err.message}`
+        );
+      }
     });
 
     // ==========================================
-    // SPAWN
+    // SUCCESSFUL SPAWN
     // ==========================================
     client.on('spawn', () => {
       console.log(
         `✅ SUCCESS! Bot cleared firewall and spawned into 2b2t overworld!`
       );
 
+      // Swing arm periodically
       actionTimer = setInterval(() => {
-        client.queue('animate', {
-          action_id: 1,
-          runtime_entity_id: client.entityId
-        });
+        try {
+          client.queue('animate', {
+            action_id: 1,
+            runtime_entity_id: client.entityId
+          });
+        } catch (err) {
+          console.log(
+            `⚠️ Failed to send animation packet: ${err.message}`
+          );
+        }
       }, 1500);
     });
 
@@ -114,7 +151,10 @@ function launchCloudBot() {
     // CONNECTION CLOSED
     // ==========================================
     client.on('close', () => {
-      console.log(`❌ Route dropped or filtered by server.`);
+      console.log(
+        `❌ Route dropped or filtered by server.`
+      );
+
       cleanupAndNext();
     });
 
@@ -122,30 +162,70 @@ function launchCloudBot() {
     // CONNECTION ERROR
     // ==========================================
     client.on('error', (err) => {
-      console.log(`⚠️ Socket stream connection failure. Advancing...`);
+      console.log(
+        `⚠️ Socket stream connection failure: ${
+          err?.message || err
+        }`
+      );
+
       cleanupAndNext();
     });
 
   } catch (e) {
-    console.log(`⚠️ Agent initialization error. Advancing...`);
+    console.log(
+      `⚠️ Agent initialization error: ${e.message}`
+    );
+
     cleanupAndNext();
   }
 
+  // ==========================================
+  // CLEANUP + NEXT PROXY
+  // ==========================================
   function cleanupAndNext() {
-    if (actionTimer) {
-      clearInterval(actionTimer);
+    // IMPORTANT:
+    // Prevent both "error" and "close" from
+    // starting multiple reconnect timers.
+    if (cleanedUp) {
+      return;
     }
 
-    // Clear the old server's player list
+    cleanedUp = true;
+
+    // Stop animation timer
+    if (actionTimer) {
+      clearInterval(actionTimer);
+      actionTimer = null;
+    }
+
+    // Clear player list from old connection
     onlinePlayers.clear();
 
+    // Move to next proxy
     poolIndex++;
 
-    setTimeout(launchCloudBot, 5000);
+    if (poolIndex >= proxyPool.length) {
+      console.log(
+        `🔁 All proxy routes attempted. Restarting from route 1...`
+      );
+    } else {
+      console.log(
+        `🔄 Moving to next route: ${
+          poolIndex + 1
+        }/${proxyPool.length}`
+      );
+    }
+
+    // Wait 5 seconds before reconnecting
+    setTimeout(() => {
+      launchCloudBot();
+    }, 5000);
   }
 }
 
 // ==========================================
 // 4. IGNITION
 // ==========================================
+console.log('🚀 Starting Cloud Bot...');
+
 launchCloudBot();
