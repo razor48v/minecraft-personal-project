@@ -22,20 +22,19 @@ const proxyPool = [
 // STATE
 // ==========================================
 let currentRoute = 0;
-
-// Last route that actually reached spawn.
-// -1 means we don't have a known-good route yet.
 let lastWorkingRoute = -1;
 
 let client = null;
 let connecting = false;
 let spawned = false;
+
 let retryTimer = null;
 let actionTimer = null;
-
-// Prevent multiple close/error handlers from
-// scheduling several reconnects at once.
 let reconnectScheduled = false;
+
+// Actual in-game player roster received from
+// the connected Bedrock client.
+const onlinePlayers = new Map();
 
 // ==========================================
 // RENDER WEB SERVER
@@ -52,7 +51,7 @@ app.listen(PORT, () => {
 });
 
 // ==========================================
-// VERSION INFO
+// STARTUP INFO
 // ==========================================
 console.log('==========================================');
 console.log('🚀 Starting Cloud Bot...');
@@ -77,12 +76,123 @@ try {
 console.log('==========================================');
 
 // ==========================================
-// SERVER STATUS
+// PRINT CURRENT IN-GAME PLAYER LIST
+// ==========================================
+function printPlayerList() {
+  const names = [...onlinePlayers.values()]
+    .map(player => player.username)
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b));
+
+  console.log('');
+  console.log('==========================================');
+  console.log(`👥 IN-GAME PLAYERS: ${names.length}`);
+
+  if (names.length === 0) {
+    console.log('👤 Nobody detected in the client player list.');
+  } else {
+    for (const name of names) {
+      console.log(`👤 ${name}`);
+    }
+  }
+
+  console.log('==========================================');
+}
+
+// ==========================================
+// NORMALIZE PLAYER RECORD
+// ==========================================
+function getPlayerName(record) {
+  if (!record) return null;
+
+  return (
+    record.username ||
+    record.name ||
+    record.display_name ||
+    null
+  );
+}
+
+function getPlayerKey(record) {
+  if (!record) return null;
+
+  return (
+    record.uuid ||
+    record.entity_unique_id?.toString?.() ||
+    record.username ||
+    null
+  );
+}
+
+// ==========================================
+// HANDLE PLAYER LIST PACKET
+// ==========================================
+function handlePlayerList(packet) {
+  if (!packet) return;
+
+  const records = Array.isArray(packet.records)
+    ? packet.records
+    : [];
+
+  if (records.length === 0) {
+    return;
+  }
+
+  let changed = false;
+
+  for (const record of records) {
+    const type = record.type;
+    const key = getPlayerKey(record);
+    const username = getPlayerName(record);
+
+    if (!key || !username) {
+      continue;
+    }
+
+    // --------------------------------------
+    // ADD
+    // --------------------------------------
+    if (
+      type === 'add' ||
+      type === 0 ||
+      type === 'ADD'
+    ) {
+      onlinePlayers.set(key, {
+        username,
+        uuid: record.uuid || null
+      });
+
+      changed = true;
+    }
+
+    // --------------------------------------
+    // REMOVE
+    // --------------------------------------
+    else if (
+      type === 'remove' ||
+      type === 1 ||
+      type === 'REMOVE'
+    ) {
+      if (onlinePlayers.delete(key)) {
+        changed = true;
+      }
+    }
+  }
+
+  if (changed) {
+    printPlayerList();
+  }
+}
+
+// ==========================================
+// SERVER PING / ADVERTISED STATUS
 // ==========================================
 let statusCheckRunning = false;
 
 async function checkServerStatus() {
-  if (statusCheckRunning) return;
+  if (statusCheckRunning) {
+    return;
+  }
 
   statusCheckRunning = true;
 
@@ -115,6 +225,7 @@ async function checkServerStatus() {
     if (status.version) {
       console.log(`🎮 VERSION: ${status.version}`);
     }
+
   } catch (err) {
     console.log(
       `⚠️ Population check failed: ${err?.message || err}`
@@ -134,7 +245,7 @@ setInterval(() => {
 }, 30000);
 
 // ==========================================
-// SCHEDULE RECONNECT
+// RECONNECT SCHEDULER
 // ==========================================
 function scheduleReconnect(delay = 5000) {
   if (reconnectScheduled) {
@@ -150,6 +261,7 @@ function scheduleReconnect(delay = 5000) {
   retryTimer = setTimeout(() => {
     retryTimer = null;
     reconnectScheduled = false;
+
     connectBot();
   }, delay);
 }
@@ -166,10 +278,14 @@ function cleanupClient() {
   client = null;
   connecting = false;
   spawned = false;
+
+  // Clear the roster because this client no
+  // longer represents the old connection.
+  onlinePlayers.clear();
 }
 
 // ==========================================
-// PICK NEXT ROUTE
+// ADVANCE ROUTE
 // ==========================================
 function advanceRoute() {
   currentRoute++;
@@ -184,21 +300,19 @@ function advanceRoute() {
 }
 
 // ==========================================
-// CONNECTION
+// CONNECT BOT
 // ==========================================
 function connectBot() {
   if (client || connecting) {
     console.log(
-      '🟢 A connection is already active/in progress.'
+      '🟢 Connection already active/in progress.'
     );
+
     return;
   }
 
   // ----------------------------------------
-  // IMPORTANT:
-  //
-  // If we previously had a route reach spawn,
-  // always retry that route first.
+  // Retry the last known working route first.
   // ----------------------------------------
   if (lastWorkingRoute !== -1) {
     currentRoute = lastWorkingRoute;
@@ -236,11 +350,11 @@ function connectBot() {
     client = newClient;
 
     // ======================================
-    // CONNECT
+    // CONNECTION
     // ======================================
     newClient.on('connect', () => {
       console.log(
-        `🔌 TCP/RakNet connection established on route ${routeNumber}`
+        `🔌 Connection established on route ${routeNumber}`
       );
     });
 
@@ -258,7 +372,7 @@ function connectBot() {
     // ======================================
     newClient.on('join', () => {
       console.log(
-        `🟡 JOIN: Server accepted login`
+        '🟡 JOIN: Server accepted login'
       );
     });
 
@@ -273,18 +387,35 @@ function connectBot() {
     });
 
     // ======================================
-    // SPAWN
+    // PLAYER LIST
     //
-    // This is the important success point.
+    // This is the important part.
+    //
+    // We listen directly to the connected
+    // client's player_list packet instead of
+    // using the server ping for the roster.
+    // ======================================
+    newClient.on('player_list', packet => {
+      try {
+        handlePlayerList(packet);
+      } catch (err) {
+        console.log(
+          `⚠️ PLAYER LIST ERROR: ${err?.message || err}`
+        );
+      }
+    });
+
+    // ======================================
+    // SPAWN
     // ======================================
     newClient.on('spawn', () => {
-      if (connectionEnded) return;
+      if (connectionEnded) {
+        return;
+      }
 
       connecting = false;
       spawned = true;
 
-      // Remember this route permanently for
-      // the lifetime of this process.
       lastWorkingRoute = currentRoute;
 
       console.log('');
@@ -293,14 +424,19 @@ function connectBot() {
         `🟢 BOT FULLY SPAWNED ON ROUTE ${routeNumber}`
       );
       console.log(
-        `⭐ Remembering route ${routeNumber} as the working route`
+        `⭐ Remembering route ${routeNumber} as working`
       );
       console.log(
-        '🔒 Staying on this route until the connection closes.'
+        '🔒 Staying on this route until disconnect.'
       );
       console.log('==========================================');
 
-      // Keep your existing small activity packet.
+      // Print whatever roster has been received so far.
+      printPlayerList();
+
+      // --------------------------------------
+      // Small activity packet
+      // --------------------------------------
       if (actionTimer) {
         clearInterval(actionTimer);
       }
@@ -320,11 +456,13 @@ function connectBot() {
     });
 
     // ======================================
-    // SERVER CHAT
+    // CHAT
     // ======================================
     newClient.on('text', packet => {
       if (packet?.message) {
-        console.log(`💬 SERVER: ${packet.message}`);
+        console.log(
+          `💬 SERVER: ${packet.message}`
+        );
       }
     });
 
@@ -337,13 +475,10 @@ function connectBot() {
 
     // ======================================
     // ERROR
-    //
-    // IMPORTANT:
-    // Don't immediately rotate if we're already
-    // spawned. Wait for close.
     // ======================================
     newClient.on('error', err => {
-      const message = err?.message || String(err);
+      const message =
+        err?.message || String(err);
 
       console.log(
         `⚠️ CLIENT ERROR: ${message}`
@@ -355,36 +490,35 @@ function connectBot() {
         )
       ) {
         console.log(
-          'ℹ️ This proxy is not compatible with the server protocol.'
+          'ℹ️ This route is presenting an unsupported Bedrock protocol.'
         );
       }
 
+      // ------------------------------------
+      // If already spawned, DO NOT rotate.
+      // Wait for close.
+      // ------------------------------------
       if (spawned) {
         console.log(
-          'ℹ️ Bot is already spawned; waiting for close before changing routes.'
+          'ℹ️ Bot is still considered connected; waiting for close.'
         );
 
         return;
       }
 
-      // Before spawn, this route failed.
-      console.log(
-        `❌ Route ${routeNumber} failed before spawn.`
-      );
-
-      if (connectionEnded) return;
+      if (connectionEnded) {
+        return;
+      }
 
       connectionEnded = true;
 
       cleanupClient();
 
-      // If we don't have a known working route,
-      // try the next proxy.
-      if (lastWorkingRoute === -1) {
-        advanceRoute();
+      if (lastWorkingRoute !== -1) {
+        currentRoute = lastWorkingRoute;
 
         console.log(
-          `🔄 Moving to route ` +
+          `⭐ Retrying known working route ` +
           `${currentRoute + 1}/${proxyPool.length}`
         );
 
@@ -393,18 +527,12 @@ function connectBot() {
         return;
       }
 
-      // We DO have a known working route.
-      // Don't forget it.
-      console.log(
-        `⭐ Known working route is ` +
-        `${lastWorkingRoute + 1}/${proxyPool.length}`
-      );
+      advanceRoute();
 
       console.log(
-        '🔁 Retrying the known working route.'
+        `🔄 Moving to route ` +
+        `${currentRoute + 1}/${proxyPool.length}`
       );
-
-      currentRoute = lastWorkingRoute;
 
       scheduleReconnect(5000);
     });
@@ -413,17 +541,19 @@ function connectBot() {
     // CLOSE
     // ======================================
     newClient.on('close', () => {
-      if (connectionEnded) return;
+      if (connectionEnded) {
+        return;
+      }
 
       connectionEnded = true;
 
-      const wasSpawned = spawned;
+      const hadSpawned = spawned;
 
       console.log('');
 
-      if (wasSpawned) {
+      if (hadSpawned) {
         console.log(
-          `🔴 Route ${routeNumber} disconnected after successful spawn.`
+          `🔴 Route ${routeNumber} disconnected.`
         );
       } else {
         console.log(
@@ -434,9 +564,7 @@ function connectBot() {
       cleanupClient();
 
       // ------------------------------------
-      // IF THIS ROUTE WORKED BEFORE:
-      //
-      // Retry it first.
+      // Retry known-good route first.
       // ------------------------------------
       if (lastWorkingRoute !== -1) {
         currentRoute = lastWorkingRoute;
@@ -452,9 +580,7 @@ function connectBot() {
       }
 
       // ------------------------------------
-      // NO KNOWN GOOD ROUTE YET:
-      //
-      // Continue through proxy list.
+      // No known-good route yet.
       // ------------------------------------
       advanceRoute();
 
@@ -468,7 +594,7 @@ function connectBot() {
 
   } catch (err) {
     console.log(
-      `⚠️ Failed to initialize route ${routeNumber}: ` +
+      `⚠️ Route initialization error: ` +
       `${err?.message || err}`
     );
 
@@ -476,11 +602,6 @@ function connectBot() {
 
     if (lastWorkingRoute !== -1) {
       currentRoute = lastWorkingRoute;
-
-      console.log(
-        `⭐ Retrying known working route ` +
-        `${currentRoute + 1}/${proxyPool.length}`
-      );
 
       scheduleReconnect(5000);
     } else {
