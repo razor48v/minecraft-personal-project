@@ -1,14 +1,17 @@
 {
   "name": "2b2t-fishing-bot",
   "version": "1.0.0",
-  "description": "24/7 Minecraft Bedrock Fishing Bot",
+  "description": "24/7 Minecraft Bedrock Bot",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
+  "engines": {
+    "node": ">=24"
+  },
   "dependencies": {
-    "bedrock-protocol": "^3.60.1",
-    "express": "^4.19.0",
-    "socks-proxy-agent": "^8.0.0"
+    "bedrock-protocol": "3.60.1",
+    "express": "4.19.0",
+    "socks-proxy-agent": "8.0.0"
   }
 }
