@@ -3,7 +3,35 @@ const bedrock = require('bedrock-protocol');
 const { SocksProxyAgent } = require('socks-proxy-agent');
 
 // ==========================================
-// 1. WEB SERVER
+// 0. VERSION / ENVIRONMENT CHECK
+// ==========================================
+console.log('==========================================');
+console.log('🚀 2b2t Pufferfish Bot Starting');
+console.log('==========================================');
+console.log('Node:', process.version);
+
+try {
+  console.log(
+    'bedrock-protocol:',
+    require('bedrock-protocol/package.json').version
+  );
+} catch (err) {
+  console.log('bedrock-protocol version: unknown');
+}
+
+try {
+  console.log(
+    'minecraft-data:',
+    require('minecraft-data/package.json').version
+  );
+} catch (err) {
+  console.log('minecraft-data version: unknown');
+}
+
+console.log('==========================================');
+
+// ==========================================
+// 1. WEB SERVER - RENDER
 // ==========================================
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -13,7 +41,7 @@ app.get('/', (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Web server active on port ${PORT}`);
+  console.log(`🌐 Web server active on port ${PORT}`);
 });
 
 // ==========================================
@@ -31,7 +59,7 @@ const proxyPool = [
 let poolIndex = 0;
 
 // ==========================================
-// 3. CORE BEDROCK CONNECTION CONTROLLER
+// 3. BOT CONTROLLER
 // ==========================================
 function launchCloudBot() {
   if (poolIndex >= proxyPool.length) {
@@ -40,24 +68,26 @@ function launchCloudBot() {
 
   const currentProxy = proxyPool[poolIndex];
 
+  console.log('');
   console.log(
-    `\n🌐 Attempting bypass using Channel Route [${poolIndex + 1}/${proxyPool.length}]: ${currentProxy}`
+    `🌐 Attempting bypass using Channel Route [` +
+    `${poolIndex + 1}/${proxyPool.length}]: ${currentProxy}`
   );
 
   let actionTimer = null;
   let cleanedUp = false;
 
-  // ==========================================
-  // TRACK ONLINE PLAYERS
-  // ==========================================
+  // ========================================
+  // ONLINE PLAYER TRACKER
+  // ========================================
   const onlinePlayers = new Map();
 
   try {
     const agent = new SocksProxyAgent(currentProxy);
 
-    // ==========================================
-    // BEDROCK CLIENT
-    // ==========================================
+    // ========================================
+    // BEDROCK CONNECTION
+    // ========================================
     const client = bedrock.createClient({
       host: '2b2tmcpe.org',
       port: 19132,
@@ -66,9 +96,9 @@ function launchCloudBot() {
       agent: agent
     });
 
-    // ==========================================
+    // ========================================
     // PLAYER LIST
-    // ==========================================
+    // ========================================
     client.on('player_list', (packet) => {
       try {
         if (!packet || !Array.isArray(packet.records)) {
@@ -76,72 +106,76 @@ function launchCloudBot() {
         }
 
         for (const player of packet.records) {
-          if (!player) continue;
+          if (!player) {
+            continue;
+          }
 
           const username = player.username;
 
-          if (!username) continue;
-
-          // ======================================
-          // PLAYER JOINED
-          // ======================================
-          if (
-            player.type === 'add' ||
-            player.legacy_type === 0
-          ) {
-            onlinePlayers.set(
-              player.uuid || username,
-              username
-            );
+          if (!username) {
+            continue;
           }
 
-          // ======================================
-          // PLAYER LEFT
-          // ======================================
-          else if (
-            player.type === 'remove' ||
-            player.legacy_type === 1
-          ) {
-            onlinePlayers.delete(
-              player.uuid || username
-            );
+          // Your server's packet uses:
+          //
+          // type: 'add'
+          // type: 'remove'
+          //
+          // rather than packet.action.
+          if (player.type === 'add') {
+            const key = player.uuid || username;
+
+            onlinePlayers.set(key, username);
+          }
+
+          else if (player.type === 'remove') {
+            const key = player.uuid || username;
+
+            onlinePlayers.delete(key);
+
+            // Fallback in case the remove packet
+            // doesn't contain the UUID we stored.
+            for (const [storedKey, storedName] of onlinePlayers) {
+              if (storedName === username) {
+                onlinePlayers.delete(storedKey);
+              }
+            }
           }
         }
 
-        // ==========================================
-        // PRINT CURRENT ONLINE PLAYERS
-        // ==========================================
+        // ======================================
+        // PRINT ONLINE COUNT
+        // ======================================
         const names = [...onlinePlayers.values()]
           .sort((a, b) => a.localeCompare(b));
 
-        console.log(
-          `👥 ONLINE: ${names.length}`
-        );
+        console.log('');
+        console.log(`👥 ONLINE: ${names.length}`);
 
         if (names.length > 0) {
-          console.log(
-            `👤 ${names.join(', ')}`
-          );
+          console.log(`👤 ${names.join(', ')}`);
+        } else {
+          console.log('👤 Nobody detected');
         }
 
       } catch (err) {
         console.log(
-          `⚠️ Player list processing error: ${err.message}`
+          `⚠️ Player-list processing error: ${err.message}`
         );
       }
     });
 
-    // ==========================================
+    // ========================================
     // SUCCESSFUL SPAWN
-    // ==========================================
+    // ========================================
     client.on('spawn', () => {
       console.log(
         '✅ SUCCESS! Bot cleared firewall and spawned into 2b2t overworld!'
       );
 
-      // ========================================
-      // SWING ARM
-      // ========================================
+      // ======================================
+      // PERIODIC ANIMATION
+      // ======================================
       actionTimer = setInterval(() => {
         try {
           client.queue('animate', {
@@ -156,9 +190,9 @@ function launchCloudBot() {
       }, 1500);
     });
 
-    // ==========================================
-    // CONNECTION ERROR
-    // ==========================================
+    // ========================================
+    // SERVER ERROR
+    // ========================================
     client.on('error', (err) => {
       console.log(
         `⚠️ Socket stream connection failure: ${
@@ -169,9 +203,9 @@ function launchCloudBot() {
       cleanupAndNext();
     });
 
-    // ==========================================
+    // ========================================
     // CONNECTION CLOSED
-    // ==========================================
+    // ========================================
     client.on('close', () => {
       console.log(
         '❌ Route dropped or filtered by server.'
@@ -180,9 +214,9 @@ function launchCloudBot() {
       cleanupAndNext();
     });
 
-    // ==========================================
+    // ========================================
     // CLEANUP + NEXT ROUTE
-    // ==========================================
+    // ========================================
     function cleanupAndNext() {
       // Prevent error + close from creating
       // multiple reconnect loops.
@@ -192,7 +226,7 @@ function launchCloudBot() {
 
       cleanedUp = true;
 
-      // Stop animation timer
+      // Stop animation
       if (actionTimer) {
         clearInterval(actionTimer);
         actionTimer = null;
@@ -210,9 +244,8 @@ function launchCloudBot() {
         );
       } else {
         console.log(
-          `🔄 Moving to next route: ${
-            poolIndex + 1
-          }/${proxyPool.length}`
+          `🔄 Moving to next route: ` +
+          `${poolIndex + 1}/${proxyPool.length}`
         );
       }
 
@@ -242,6 +275,4 @@ function launchCloudBot() {
 // ==========================================
 // 4. IGNITION
 // ==========================================
-console.log('🚀 Starting Cloud Bot...');
-
 launchCloudBot();
