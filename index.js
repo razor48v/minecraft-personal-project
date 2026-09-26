@@ -59,7 +59,78 @@ const proxyPool = [
 let poolIndex = 0;
 
 // ==========================================
-// 3. BOT CONTROLLER
+// 3. SERVER STATUS CHECK
+// ==========================================
+// Uses bedrock-protocol's built-in ping() to
+// ask the server for its advertised status.
+//
+// This is independent from the bot's SOCKS
+// connection.
+// ==========================================
+let statusCheckRunning = false;
+
+async function checkServerStatus() {
+  // Prevent overlapping status checks
+  if (statusCheckRunning) {
+    return;
+  }
+
+  statusCheckRunning = true;
+
+  try {
+    const status = await bedrock.ping({
+      host: '2b2tmcpe.org',
+      port: 19132,
+      transport: 'raknet',
+      timeout: 5000
+    });
+
+    const playerCount =
+      status.playersOnline ??
+      status.playerCount ??
+      0;
+
+    const maxPlayers =
+      status.playersMax ??
+      status.maxPlayers ??
+      '?';
+
+    console.log(
+      `📊 SERVER ONLINE: ${playerCount}/${maxPlayers}`
+    );
+
+    if (status.motd) {
+      console.log(`📝 MOTD: ${status.motd}`);
+    }
+
+    if (status.version) {
+      console.log(`🎮 VERSION: ${status.version}`);
+    }
+
+  } catch (err) {
+    console.log(
+      `⚠️ SERVER STATUS FAILED: ${
+        err?.message || err
+      }`
+    );
+  } finally {
+    statusCheckRunning = false;
+  }
+}
+
+// ==========================================
+// 4. START SERVER STATUS MONITOR
+// ==========================================
+// Check immediately, then every 30 seconds.
+// ==========================================
+checkServerStatus();
+
+const statusInterval = setInterval(() => {
+  checkServerStatus();
+}, 30000);
+
+// ==========================================
+// 5. CORE BEDROCK CONNECTION CONTROLLER
 // ==========================================
 function launchCloudBot() {
   if (poolIndex >= proxyPool.length) {
@@ -78,7 +149,7 @@ function launchCloudBot() {
   let cleanedUp = false;
 
   // ========================================
-  // ONLINE PLAYER TRACKER
+  // PLAYER LIST TRACKER
   // ========================================
   const onlinePlayers = new Map();
 
@@ -86,7 +157,7 @@ function launchCloudBot() {
     const agent = new SocksProxyAgent(currentProxy);
 
     // ========================================
-    // BEDROCK CONNECTION
+    // BEDROCK CLIENT
     // ========================================
     const client = bedrock.createClient({
       host: '2b2tmcpe.org',
@@ -116,16 +187,17 @@ function launchCloudBot() {
             continue;
           }
 
-          // Your server's packet uses:
-          //
+          // Your server sends:
           // type: 'add'
           // type: 'remove'
-          //
-          // rather than packet.action.
+
           if (player.type === 'add') {
             const key = player.uuid || username;
 
-            onlinePlayers.set(key, username);
+            onlinePlayers.set(
+              key,
+              username
+            );
           }
 
           else if (player.type === 'remove') {
@@ -133,9 +205,11 @@ function launchCloudBot() {
 
             onlinePlayers.delete(key);
 
-            // Fallback in case the remove packet
-            // doesn't contain the UUID we stored.
-            for (const [storedKey, storedName] of onlinePlayers) {
+            // Fallback removal by username
+            for (
+              const [storedKey, storedName]
+              of onlinePlayers
+            ) {
               if (storedName === username) {
                 onlinePlayers.delete(storedKey);
               }
@@ -143,24 +217,27 @@ function launchCloudBot() {
           }
         }
 
-        // ======================================
-        // PRINT ONLINE COUNT
-        // ======================================
-        const names = [...onlinePlayers.values()]
-          .sort((a, b) => a.localeCompare(b));
+        const names = [
+          ...onlinePlayers.values()
+        ].sort((a, b) =>
+          a.localeCompare(b)
+        );
 
-        console.log('');
-        console.log(`👥 ONLINE: ${names.length}`);
+        console.log(
+          `👥 CLIENT PLAYER LIST: ${names.length}`
+        );
 
         if (names.length > 0) {
-          console.log(`👤 ${names.join(', ')}`);
-        } else {
-          console.log('👤 Nobody detected');
+          console.log(
+            `👤 ${names.join(', ')}`
+          );
         }
 
       } catch (err) {
         console.log(
-          `⚠️ Player-list processing error: ${err.message}`
+          `⚠️ Player-list processing error: ${
+            err.message
+          }`
         );
       }
     });
@@ -184,7 +261,9 @@ function launchCloudBot() {
           });
         } catch (err) {
           console.log(
-            `⚠️ Animation packet error: ${err.message}`
+            `⚠️ Animation packet error: ${
+              err.message
+            }`
           );
         }
       }, 1500);
@@ -226,16 +305,13 @@ function launchCloudBot() {
 
       cleanedUp = true;
 
-      // Stop animation
       if (actionTimer) {
         clearInterval(actionTimer);
         actionTimer = null;
       }
 
-      // Clear old player list
       onlinePlayers.clear();
 
-      // Move to next proxy
       poolIndex++;
 
       if (poolIndex >= proxyPool.length) {
@@ -249,7 +325,6 @@ function launchCloudBot() {
         );
       }
 
-      // Wait before reconnecting
       setTimeout(() => {
         launchCloudBot();
       }, 5000);
@@ -257,7 +332,9 @@ function launchCloudBot() {
 
   } catch (err) {
     console.log(
-      `⚠️ Agent initialization error: ${err.message}`
+      `⚠️ Agent initialization error: ${
+        err.message
+      }`
     );
 
     if (!cleanedUp) {
@@ -273,6 +350,6 @@ function launchCloudBot() {
 }
 
 // ==========================================
-// 4. IGNITION
+// 6. START BOT
 // ==========================================
 launchCloudBot();
