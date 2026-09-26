@@ -7,7 +7,7 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "bedrock-protocol": "^3.30.0",
+    "bedrock-protocol": "^3.60.1",
     "express": "^4.19.0",
     "socks-proxy-agent": "^8.0.0"
   }
