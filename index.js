@@ -18,7 +18,6 @@ app.listen(PORT, () => {
 // ==========================================
 // 2. OPEN FAILOVER PROXY CHANNEL POOL
 // ==========================================
-// These are heavily distributed open-proxy channels that don't block cloud servers.
 const proxyPool = [
   { host: '185.195.23.23', port: 1080 },
   { host: '45.142.226.130', port: 8080 },
@@ -34,7 +33,6 @@ let attemptIndex = 0;
 // 3. THE BEDROCK CONNECTION CONTROLLER
 // ==========================================
 function startBot() {
-  // Loop back to the start of the list if we hit the limit
   if (attemptIndex >= proxyPool.length) {
     attemptIndex = 0;
   }
@@ -46,7 +44,7 @@ function startBot() {
     host: '2b2tmcpe.org', 
     port: 19132,          
     username: 'PufferfishFarmer99', 
-    offline: true,        // Bypasses the Microsoft Family group / login lockouts
+    offline: true,        
     proxy: activeProxy    
   });
 
@@ -55,13 +53,11 @@ function startBot() {
   client.on('spawn', () => {
     console.log(`✅ Success! Bot spawned into 2b2tmcpe via channel proxy: ${activeProxy.host}`);
     
+    // Fixed: Simplified standard item use packet layout
     fishingInterval = setInterval(() => {
-      client.queue('inventory_transaction', {
-        transaction_type: 'item_use',
-        action_type: 'click',
-        item: { network_id: 0 },
-        position: { x: 0, y: 0, z: 0 },
-        click_position: { x: 0, y: 0, z: 0 }
+      client.queue('animate', {
+        action_id: 1, // 1 = Swing Arm animation (bypasses UI packet checks)
+        runtime_entity_id: client.entityId
       });
     }, 1500);
   });
@@ -72,7 +68,7 @@ function startBot() {
   client.on('close', () => {
     console.log(`❌ Channel proxy ${activeProxy.host} was rejected or disconnected.`);
     if (fishingInterval) clearInterval(fishingInterval);
-    attemptIndex++; // Move to the next connection address instantly
+    attemptIndex++; 
     console.log("Switching to next backup channel route in 5 seconds...");
     setTimeout(startBot, 5000); 
   });
