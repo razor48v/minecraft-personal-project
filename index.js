@@ -17,32 +17,40 @@ app.listen(PORT, () => {
 });
 
 // ==========================================
-// 2. AUTOMATIC PROXY HARVESTER
+// 2. AUTOMATIC PROXY HARVESTER (FIXED)
 // ==========================================
-// This function downloads a list of fresh free proxies automatically so you don't need a list
 function getFreeProxyList() {
   return new Promise((resolve) => {
-    console.log("Fetching fresh proxy lists...");
-    // Grabs a list of free HTTP proxies from a public testing API
-    const url = 'https://proxyscrape.com';
+    console.log("Fetching fresh proxy lists from secure text API...");
+    // Swapped to a raw-text provider that does not block data centers
+    const url = 'https://pubproxy.com';
     
     https.get(url, (res) => {
       let data = '';
       res.on('data', (chunk) => data += chunk);
       res.on('end', () => {
-        const lines = data.split('\r\n').filter(line => line.includes(':'));
-        // Formats the raw text strings into IP objects the bot understands
+        // Splitting by lines and ensuring it's a valid string format
+        const lines = data.split('\n').filter(line => line.trim().includes(':'));
+        
+        if (lines.length === 0) {
+          console.log("⚠️ Received empty or invalid proxy data from API.");
+          resolve([]);
+          return;
+        }
+
         const formattedProxies = lines.map(line => {
-          const [host, port] = line.split(':');
+          const [host, port] = line.trim().split(':');
           return { host, port: parseInt(port) };
         });
         resolve(formattedProxies);
       });
-    }).on('error', () => {
-      resolve([]); // Return empty array if the API is down
+    }).on('error', (err) => {
+      console.log("API connection error:", err.message);
+      resolve([]);
     });
   });
 }
+
 
 // ==========================================
 // 3. THE BEDROCK CONNECTION CONTROLLER
