@@ -1,6 +1,5 @@
 'use strict';
 
-const express = require('express');
 const bedrock = require('bedrock-protocol');
 
 // ============================================================
@@ -13,7 +12,6 @@ const PORT = 19132;
 const USERNAME = 'PufferfishFarmer99';
 const OFFLINE_MODE = true;
 
-const WEB_PORT = process.env.PORT || 3000;
 const RETRY_DELAY_MS = 5000;
 const POPULATION_INTERVAL_MS = 30_000;
 
@@ -27,22 +25,7 @@ let spawned = false;
 let shuttingDown = false;
 let reconnectScheduled = false;
 
-// Player names observed from the connected client.
 const players = new Map();
-
-// ============================================================
-// WEB SERVER
-// ============================================================
-
-const app = express();
-
-app.get('/', (req, res) => {
-  res.send('2b2t Bedrock bot is running.');
-});
-
-app.listen(WEB_PORT, () => {
-  console.log(`🌐 Web server active on port ${WEB_PORT}`);
-});
 
 // ============================================================
 // LOGGING HELPERS
@@ -60,7 +43,7 @@ function printPlayers() {
     .filter(Boolean)
     .sort((a, b) => a.localeCompare(b));
 
-  console.log(`👥 CLIENT ONLINE: ${names.length}`);
+  console.log(`👥 CLIENTS ONLINE: ${names.length}`);
 
   if (names.length === 0) {
     console.log('   Nobody detected');
@@ -73,7 +56,7 @@ function printPlayers() {
 }
 
 // ============================================================
-// SERVER STATUS
+// SERVER STATUS MONITOR
 // ============================================================
 
 async function checkServerStatus() {
@@ -90,16 +73,8 @@ async function checkServerStatus() {
       return;
     }
 
-    const online =
-      result.players?.online ??
-      result.online ??
-      result.player_count ??
-      '?';
-
-    const max =
-      result.players?.max ??
-      result.max ??
-      '?';
+    const online = result.players?.online ?? result.online ?? result.player_count ?? '?';
+    const max = result.players?.max ?? result.max ?? '?';
 
     console.log(`📊 SERVER STATUS: ${online}/${max}`);
 
@@ -107,14 +82,14 @@ async function checkServerStatus() {
       console.log(`📝 MOTD: ${result.motd}`);
     }
   } catch (err) {
-    console.log(
-      `⚠️ Server status unavailable: ${err?.message || String(err)}`
-    );
+    console.log(`⚠️ Server status ping failed: ${err?.message || String(err)}`);
   }
 }
 
 setInterval(() => {
-  checkServerStatus();
+  if (connected) {
+    checkServerStatus();
+  }
 }, POPULATION_INTERVAL_MS);
 
 // ============================================================
@@ -127,12 +102,9 @@ function destroyClient(reason = 'cleanup') {
   client = null;
   connected = false;
   spawned = false;
-
   players.clear();
 
-  if (!oldClient) {
-    return;
-  }
+  if (!oldClient) return;
 
   console.log(`🧹 Cleaning up client: ${reason}`);
 
@@ -156,20 +128,14 @@ function destroyClient(reason = 'cleanup') {
 }
 
 function scheduleReconnect(reason) {
-  if (shuttingDown || reconnectScheduled) {
-    return;
-  }
+  if (shuttingDown || reconnectScheduled) return;
 
   reconnectScheduled = true;
   console.log(`🔄 ${reason}`);
 
   setTimeout(() => {
     reconnectScheduled = false;
-
-    if (shuttingDown) {
-      return;
-    }
-
+    if (shuttingDown) return;
     connectToServer();
   }, RETRY_DELAY_MS);
 }
@@ -179,12 +145,10 @@ function scheduleReconnect(reason) {
 // ============================================================
 
 function connectToServer() {
-  if (shuttingDown) {
-    return;
-  }
+  if (shuttingDown) return;
 
   if (client || connected) {
-    console.log('🔒 Existing client is active; not opening another connection.');
+    console.log('🔒 Existing client is active; skipping duplicate connection.');
     return;
   }
 
@@ -198,8 +162,7 @@ function connectToServer() {
       port: PORT,
       username: USERNAME,
       offline: OFFLINE_MODE,
-      skipPing: true, // Prevents ping timeout issues during connection handshakes
-      raknetBackend: 'jsp-raknet' // pure JS RakNet backend for cloud environment compatibility
+      skipPing: true // Speeds up login handshake over UDP
     });
 
     client = newClient;
@@ -209,12 +172,10 @@ function connectToServer() {
     // --------------------------------------------------------
 
     newClient.on('play_status', (packet) => {
-      console.log(`🎮 PLAY_STATUS:`, packet);
-
       if (packet?.status === 'login_success') {
         connected = true;
-        console.log('🟡 JOIN: Server accepted login');
-        console.log('🟡 Waiting for player_spawn...');
+        console.log('🟡 JOIN: Server accepted login packet');
+        console.log('🟡 Waiting for world spawn...');
       }
 
       if (packet?.status === 'player_spawn') {
@@ -254,21 +215,11 @@ function connectToServer() {
 
         for (const record of records) {
           const username = record?.username;
+          if (!username) continue;
 
-          if (!username) {
-            continue;
-          }
+          const uuid = String(record.uuid ?? record.entity_unique_id ?? username);
 
-          const uuid = String(
-            record.uuid ??
-            record.entity_unique_id ??
-            username
-          );
-
-          if (
-            record.type === 'remove' ||
-            record.type === 'remove_player'
-          ) {
+          if (record.type === 'remove' || record.type === 'remove_player') {
             players.delete(uuid);
             console.log(`👋 PLAYER LEFT: ${username}`);
           } else {
@@ -279,14 +230,12 @@ function connectToServer() {
 
         printPlayers();
       } catch (err) {
-        console.log(
-          `⚠️ Player-list processing error: ${err?.message || String(err)}`
-        );
+        console.log(`⚠️ Player list processing error: ${err?.message || String(err)}`);
       }
     });
 
     // --------------------------------------------------------
-    // ERROR & CLOSE HANDLERS
+    // ERROR & DISCONNECT HANDLERS
     // --------------------------------------------------------
 
     newClient.on('error', (err) => {
@@ -294,10 +243,10 @@ function connectToServer() {
       console.log(`⚠️ CLIENT ERROR: ${message}`);
 
       destroyClient(`Client error: ${message}`);
-      scheduleReconnect('Reconnecting after error...');
+      scheduleReconnect('Reconnecting after network error...');
     });
 
-    newClient.on('close', (reason) => {
+    newClient.on('close', () => {
       console.log('❌ CLIENT CONNECTION CLOSED');
 
       if (spawnTimeout) {
@@ -305,40 +254,38 @@ function connectToServer() {
         spawnTimeout = null;
       }
 
-      destroyClient('Connection closed by server');
+      destroyClient('Disconnected by server');
       scheduleReconnect('Reconnecting after disconnect...');
     });
 
     // --------------------------------------------------------
-    // SPAWN TIMEOUT
+    // SPAWN TIMEOUT GUARD
     // --------------------------------------------------------
 
     spawnTimeout = setTimeout(() => {
-      if (shuttingDown || spawned || client !== newClient) {
-        return;
-      }
+      if (shuttingDown || spawned || client !== newClient) return;
 
       console.log('⏰ Spawn timeout reached.');
-      destroyClient('Login accepted but player_spawn timeout reached');
+      destroyClient('Connected, but server never sent player_spawn packet');
       scheduleReconnect('Retrying connection...');
     }, 45_000);
 
   } catch (err) {
     console.log(`💥 Initialization error: ${err?.message || String(err)}`);
     destroyClient('Initialization failed');
-    scheduleReconnect('Retrying connection after initialization failure...');
+    scheduleReconnect('Retrying initialization...');
   }
 }
 
 // ============================================================
-// STARTUP & SHUTDOWN
+// STARTUP & CLEAN SHUTDOWN
 // ============================================================
 
 async function start() {
-  logHeader('🚀 Starting Bot');
+  logHeader('🚀 Starting Local Bot');
 
   console.log(`🖥️ Node: ${process.version}`);
-  console.log(`🎮 Server: ${HOST}:${PORT}`);
+  console.log(`🎮 Target Server: ${HOST}:${PORT}`);
   console.log(`👤 Username: ${USERNAME}`);
   console.log(`🔐 Offline mode: ${OFFLINE_MODE}`);
 
@@ -347,12 +294,10 @@ async function start() {
 }
 
 function shutdown(signal) {
-  if (shuttingDown) {
-    return;
-  }
+  if (shuttingDown) return;
 
   shuttingDown = true;
-  console.log(`\n🛑 Received ${signal}. Shutting down...`);
+  console.log(`\n🛑 Received ${signal}. Shutting down cleanly...`);
   destroyClient(`shutdown (${signal})`);
   process.exit(0);
 }
